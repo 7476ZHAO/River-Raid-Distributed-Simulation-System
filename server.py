@@ -1,116 +1,118 @@
+import json
+import random
 import time
 import threading
-from multiprocessing import shared_memory
-import json
 import os
 
-# -------------------------
-# Shared Memory Definition
-# -------------------------
-def init_shared_memory():
-    # JSON game state
-    initial_state = {
-        "player_x": 50,
-        "player_y": 90,
-        "H_enemy": 10,
-        "J_enemy": 30,
-        "B_enemy": 70,
-        "action": "NONE"
-    }
+# -----------------------------
+# Shared memory paths on VPS
+# -----------------------------
+PLAYER_ACTION_FILE = "/tmp/player_action"
+GAME_STATE_FILE = "/tmp/game_state.json"
 
-    data = json.dumps(initial_state).encode("utf-8")
-    shm = shared_memory.SharedMemory(create=True, size=4096, name="game_state")
+# -----------------------------
+# Initial game state
+# -----------------------------
+game_state = {
+    "player_x": 0,
+    "player_y": -200,
+    "ai_x": 0,
+    "ai_y": 150,
+    "bullets": [],
+    "enemies": [],
+    "river_left": -150,
+    "river_right": 150
+}
 
-    shm.buf[:len(data)] = data
-    return shm
+player_lock = threading.Lock()
 
-def read_shared_memory(shm):
-    raw = bytes(shm.buf[:4096]).rstrip(b"\x00")
-    return json.loads(raw)
 
-def write_shared_memory(shm, obj):
-    data = json.dumps(obj).encode("utf-8")
-    shm.buf[:4096] = b"\x00" * 4096
-    shm.buf[:len(data)] = data
-
-# -------------------------
-# Enemy Thread Behaviors
-# -------------------------
-def enemy_H(shm):
+# -----------------------------
+# AI random action thread
+# -----------------------------
+def ai_action_thread():
     while True:
-        state = read_shared_memory(shm)
-        state["H_enemy"] += 1
-        write_shared_memory(shm, state)
-        time.sleep(1)
+        game_state["ai_move"] = random.choice(["H", "J", "B", "NONE"])
+        time.sleep(0.15)
 
-def enemy_J(shm):
+
+# -----------------------------
+# Game Logic Thread
+# -----------------------------
+def game_logic_thread():
     while True:
-        state = read_shared_memory(shm)
-        state["J_enemy"] -= 1
-        write_shared_memory(shm, state)
-        time.sleep(1.2)
+        # -------------------------
+        # 1. Read player action from file
+        # -------------------------
+        if os.path.exists(PLAYER_ACTION_FILE):
+            with open(PLAYER_ACTION_FILE, "r") as f:
+                player_action = f.read().strip()
+        else:
+            player_action = "NONE"
 
-def enemy_B(shm):
-    while True:
-        state = read_shared_memory(shm)
-        state["B_enemy"] += 2
-        write_shared_memory(shm, state)
-        time.sleep(0.8)
+        # -------------------------
+        # 2. Update player
+        # -------------------------
+        if player_action == "LEFT":
+            game_state["player_x"] -= 10
+        elif player_action == "RIGHT":
+            game_state["player_x"] += 10
+        elif player_action == "UP":
+            game_state["player_y"] += 10
+        elif player_action == "DOWN":
+            game_state["player_y"] -= 10
+        elif player_action == "FIRE":
+            game_state["bullets"].append([game_state["player_x"], game_state["player_y"] + 20])
 
-# -------------------------
-# Read Client Action
-# -------------------------
-def read_client_action():
-    if not os.path.exists("/tmp/player_action"):
-        return None
+        # -------------------------
+        # 3. Update AI
+        # -------------------------
+        ai_move = game_state.get("ai_move", "NONE")
 
-    with open("/tmp/player_action", "r") as f:
-        return f.read().strip()
+        if ai_move == "H":  # left
+            game_state["ai_x"] -= 10
+        elif ai_move == "J":  # right
+            game_state["ai_x"] += 10
+        elif ai_move == "B":  # fire
+            game_state["bullets"].append([game_state["ai_x"], game_state["ai_y"] - 20])
 
-# -------------------------
-# Apply Player Action
-# -------------------------
-def apply_player_action(shm):
-    while True:
-        action = read_client_action()
-        if action:
-            state = read_shared_memory(shm)
+        # -------------------------
+        # 4. Move bullets
+        # -------------------------
+        for b in game_state["bullets"]:
+            b[1] += 15
+        game_state["bullets"] = [b for b in game_state["bullets"] if b[1] < 300]
 
-            if action == "LEFT":
-                state["player_x"] -= 2
-            elif action == "RIGHT":
-                state["player_x"] += 2
-            elif action == "UP":
-                state["player_y"] -= 2
-            elif action == "DOWN":
-                state["player_y"] += 2
-            elif action == "FIRE":
-                print("Player fires!")
+        # -------------------------
+        # 5. Random enemies
+        # -------------------------
+        if random.random() < 0.03:
+            game_state["enemies"].append([random.randint(-120, 120), 300])
 
-            state["action"] = action
-            write_shared_memory(shm, state)
+        for e in game_state["enemies"]:
+            e[1] -= 5
+        game_state["enemies"] = [e for e in game_state["enemies"] if e[1] > -300]
 
-        time.sleep(0.2)
+        # -------------------------
+        # 6. Write game_state.json
+        # -------------------------
+        with open(GAME_STATE_FILE, "w") as f:
+            json.dump(game_state, f)
 
-# -------------------------
-# MAIN SERVER PROGRAM
-# -------------------------
-def main():
-    shm = init_shared_memory()
-    print("Shared memory created: game_state")
+        time.sleep(0.03)
 
-    # Launch enemy threads
-    threading.Thread(target=enemy_H, args=(shm,), daemon=True).start()
-    threading.Thread(target=enemy_J, args=(shm,), daemon=True).start()
-    threading.Thread(target=enemy_B, args=(shm,), daemon=True).start()
 
-    # Launch action reader
-    threading.Thread(target=apply_player_action, args=(shm,), daemon=True).start()
+# -----------------------------
+# Start threads
+# -----------------------------
+print("Server running with AI thread + Game logic thread")
 
-    # Keep server running
-    while True:
-        print(read_shared_memory(shm))
-        time.sleep(2)
+t1 = threading.Thread(target=ai_action_thread, daemon=True)
+t2 = threading.Thread(target=game_logic_thread, daemon=True)
 
-if __name__ == "__main__":
-    main()
+t1.start()
+t2.start()
+
+# Keep server alive
+while True:
+    time.sleep(1)
