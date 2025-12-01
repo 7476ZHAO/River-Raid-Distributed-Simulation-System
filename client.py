@@ -1,121 +1,150 @@
-import paramiko
 import turtle
+import threading
 import time
+import paramiko
+import json
+import io
 
-# -------------------------
-# SSH Configuration
-# -------------------------
+# -----------------------------
+# SSH CONFIG
+# -----------------------------
 VPS_IP = "YOUR_VPS_IP"
 USERNAME = "YOUR_VPS_USERNAME"
-PRIVATE_KEY = "/path/to/id_rsa"
+SSH_KEY = "YOUR_PRIVATE_KEY_PATH"   # You will replace this yourself
+GAME_STATE_FILE = "/tmp/game_state.json"
+PLAYER_ACTION_FILE = "/tmp/player_action"
 
-def send_action_to_vps(action):
+
+# -----------------------------
+# SSH helpers
+# -----------------------------
+def ssh_connect():
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(VPS_IP, username=USERNAME, key_filename=SSH_KEY)
+    return ssh
 
-    ssh.connect(
-        hostname=VPS_IP,
-        username=USERNAME,
-        key_filename=PRIVATE_KEY
-    )
 
-    cmd = f"echo {action} > /tmp/player_action"
+def send_action(action):
+    ssh = ssh_connect()
+    cmd = f"echo {action} > {PLAYER_ACTION_FILE}"
     ssh.exec_command(cmd)
     ssh.close()
 
 
-# -------------------------
-# Turtle Graphics Setup
-# -------------------------
-screen = turtle.Screen()
-screen.title("River Raid - Client Controller")
-screen.bgcolor("black")
-screen.setup(width=600, height=600)
+def get_state():
+    ssh = ssh_connect()
+    sftp = ssh.open_sftp()
 
-# Draw Player
+    try:
+        remote_file = sftp.file(GAME_STATE_FILE, "r")
+        data = remote_file.read().decode()
+        remote_file.close()
+        sftp.close()
+        ssh.close()
+        return json.loads(data)
+    except:
+        sftp.close()
+        ssh.close()
+        return None
+
+
+# -----------------------------
+# Turtle Graphics Setup
+# -----------------------------
+screen = turtle.Screen()
+screen.title("Distributed River Raid (Client View)")
+screen.setup(600, 600)
+screen.tracer(False)
+
 player = turtle.Turtle()
 player.shape("triangle")
-player.color("lime")
+player.color("white")
 player.penup()
-player.goto(0, -200)
 
-# Draw enemies (dummy local display)
-enemy_H = turtle.Turtle()
-enemy_H.shape("circle")
-enemy_H.color("red")
-enemy_H.penup()
-enemy_H.goto(-200, 100)
+ai = turtle.Turtle()
+ai.shape("triangle")
+ai.color("red")
+ai.penup()
 
-enemy_J = turtle.Turtle()
-enemy_J.shape("circle")
-enemy_J.color("yellow")
-enemy_J.penup()
-enemy_J.goto(0, 150)
+enemy_turtles = []
 
-enemy_B = turtle.Turtle()
-enemy_B.shape("circle")
-enemy_B.color("cyan")
-enemy_B.penup()
-enemy_B.goto(200, 50)
+# -----------------------------
+# Render Thread
+# -----------------------------
+def render_thread():
+    global enemy_turtles
 
-# -------------------------
-# Movement Functions
-# -------------------------
-def move_left():
-    x = player.xcor()
-    player.setx(x - 20)
-    send_action_to_vps("LEFT")
-
-def move_right():
-    x = player.xcor()
-    player.setx(x + 20)
-    send_action_to_vps("RIGHT")
-
-def move_up():
-    y = player.ycor()
-    player.sety(y + 20)
-    send_action_to_vps("UP")
-
-def move_down():
-    y = player.ycor()
-    player.sety(y - 20)
-    send_action_to_vps("DOWN")
-
-def fire():
-    print("FIRE!")
-    send_action_to_vps("FIRE")
-
-
-# -------------------------
-# Key Bindings
-# -------------------------
-screen.listen()
-screen.onkeypress(move_left, "Left")
-screen.onkeypress(move_right, "Right")
-screen.onkeypress(move_up, "Up")
-screen.onkeypress(move_down, "Down")
-screen.onkeypress(fire, "space")
-
-# -------------------------
-# Local Enemy Animation (Optional)
-# -------------------------
-def animate_enemies():
     while True:
-        enemy_H.setx(enemy_H.xcor() + 1)
-        enemy_J.setx(enemy_J.xcor() - 1)
-        enemy_B.setx(enemy_B.xcor() + 2)
+        state = get_state()
+        if not state:
+            continue
+
+        screen.clear()
+
+        # Draw river
+        river = turtle.Turtle()
+        river.hideturtle()
+        river.penup()
+        river.goto(state["river_left"], -300)
+        river.pendown()
+        river.goto(state["river_left"], 300)
+        river.goto(state["river_right"], 300)
+        river.goto(state["river_right"], -300)
+        river.goto(state["river_left"], -300)
+
+        # Player
+        player.goto(state["player_x"], state["player_y"])
+
+        # AI
+        ai.goto(state["ai_x"], state["ai_y"])
+
+        # Enemies
+        for t in enemy_turtles:
+            t.hideturtle()
+        enemy_turtles = []
+
+        for e in state["enemies"]:
+            t = turtle.Turtle()
+            t.shape("square")
+            t.color("yellow")
+            t.penup()
+            t.goto(e[0], e[1])
+            enemy_turtles.append(t)
+
+        # Bullets
+        for b in state["bullets"]:
+            bt = turtle.Turtle()
+            bt.shape("circle")
+            bt.color("orange")
+            bt.penup()
+            bt.goto(b[0], b[1])
+
         screen.update()
-        time.sleep(0.05)
+        time.sleep(0.03)
 
-# If you want real VPS state visualization, I can add that too.
 
-# -------------------------
-# Main Loop
-# -------------------------
-screen.tracer(0)
+# -----------------------------
+# Keyboard controls
+# -----------------------------
+def go_left(): send_action("LEFT")
+def go_right(): send_action("RIGHT")
+def go_up(): send_action("UP")
+def go_down(): send_action("DOWN")
+def fire(): send_action("FIRE")
 
-while True:
-    screen.update()
-    time.sleep(0.01)
+screen.onkey(go_left, "Left")
+screen.onkey(go_right, "Right")
+screen.onkey(go_up, "Up")
+screen.onkey(go_down, "Down")
+screen.onkey(fire, "space")
+screen.listen()
+
+
+# -----------------------------
+# Start threads
+# -----------------------------
+t = threading.Thread(target=render_thread, daemon=True)
+t.start()
 
 turtle.done()
