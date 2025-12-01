@@ -9,8 +9,8 @@ import io
 # SSH CONFIG
 # -----------------------------
 VPS_IP = "34.139.110.221" #need to update every the vps restart
-USERNAME = "VPS101"
-SSH_KEY = "D:\SCSU\25Fall\CSCI 593\SSH"   
+USERNAME = "rsa-key-20251020"
+SSH_KEY = r"D:\SCSU\25Fall\CSCI 593\SSH\rsa-key-20251020.ppk"
 GAME_STATE_FILE = "/tmp/game_state.json"
 PLAYER_ACTION_FILE = "/tmp/player_action"
 
@@ -55,11 +55,12 @@ def get_state():
 screen = turtle.Screen()
 screen.title("Distributed River Raid (Client View)")
 screen.setup(600, 600)
+screen.bgcolor("black")
 screen.tracer(False)
 
 player = turtle.Turtle()
 player.shape("triangle")
-player.color("white")
+player.color("green")
 player.penup()
 
 ai = turtle.Turtle()
