@@ -3,149 +3,201 @@ import threading
 import time
 import paramiko
 import json
-import io
-
-# -----------------------------
-# SSH CONFIG
-# -----------------------------
-VPS_IP = "34.139.110.221" #need to update every time the vps restart
-USERNAME = "rsa-key-20251020"
-SSH_KEY = r"D:\SCSU\25Fall\CSCI 593\SSH\rsa-key-20251020.ppk"
-GAME_STATE_FILE = "/tmp/game_state.json"
-PLAYER_ACTION_FILE = "/tmp/player_action"
 
 
-# -----------------------------
-# SSH helpers
-# -----------------------------
-def ssh_connect():
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(VPS_IP, username=USERNAME, key_filename=SSH_KEY)
-    return ssh
 
+# PASSWORD MODE, ONLY FOR DEV PURPOSES
+
+# # -----------------------------
+# # SSH CONFIG
+# # -----------------------------
+# VPS_IP = "127.0.0.1"
+# USERNAME = "saad"
+# SSH_PASSWORD = "scsu1869"
+# GAME_STATE_FILE = "/tmp/game_state.json"
+# PLAYER_ACTION_FILE = "/tmp/player_action"
+
+# # -----------------------------
+# # SSH persistent connection
+# # -----------------------------
+# ssh = paramiko.SSHClient()
+# ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+# ssh.connect(VPS_IP, username=USERNAME, password=SSH_PASSWORD)
+# sftp = ssh.open_sftp()
+
+# def send_action(action):
+#     ssh.exec_command(f"echo {action} > {PLAYER_ACTION_FILE}")
+
+# _last_mtime = 0
+# def get_state():
+#     try:
+#         remote_file = sftp.file(GAME_STATE_FILE, "r")
+#         data = remote_file.read().decode()
+#         remote_file.close()
+#         return json.loads(data)
+#     except Exception as e:
+#         print("Error reading state:", e)
+#         return None
+
+
+
+# -----------------------------
+# SSH CONFIG (PUBLIC KEY)
+# -----------------------------
+VPS_IP_KEY = "127.0.0.1"  # local WSL / VPS
+USERNAME_KEY = "saad"
+ssh_FILE = r"C:\path\to\your\private_key.ppk"  # replace with your actual private key path
+GAME_STATE_FILE_KEY = "/tmp/game_state.json"
+PLAYER_ACTION_FILE_KEY = "/tmp/player_action"
+
+# -----------------------------
+# SSH persistent connection (PUBLIC KEY)
+# -----------------------------
+ssh = paramiko.SSHClient()
+ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+ssh.connect(VPS_IP_KEY, username=USERNAME_KEY, key_filename=ssh_FILE)
+sftp = ssh.open_sftp()
 
 def send_action(action):
-    ssh = ssh_connect()
-    cmd = f"echo {action} > {PLAYER_ACTION_FILE}"
-    ssh.exec_command(cmd)
-    ssh.close()
-
+    """Send player action using public key SSH connection"""
+    ssh.exec_command(f"echo {action} > {PLAYER_ACTION_FILE_KEY}")
 
 def get_state():
-    ssh = ssh_connect()
-    sftp = ssh.open_sftp()
-
+    """Fetch game state using public key SSH connection"""
     try:
-        remote_file = sftp.file(GAME_STATE_FILE, "r")
+        remote_file = sftp.file(GAME_STATE_FILE_KEY, "r")
         data = remote_file.read().decode()
         remote_file.close()
-        sftp.close()
-        ssh.close()
         return json.loads(data)
-    except:
-        sftp.close()
-        ssh.close()
+    except Exception as e:
+        print("Error reading state (key SSH):", e)
         return None
 
 
 # -----------------------------
-# Turtle Graphics Setup
+# Turtle setup
 # -----------------------------
 screen = turtle.Screen()
-screen.title("Distributed River Raid (Client View)")
-screen.setup(600, 600)
+screen.title("River Raid")
+screen.setup(600, 800)  # portrait
 screen.bgcolor("black")
 screen.tracer(False)
 
+# -----------------------------
+# Load river GIF
+# -----------------------------
+RIVER_IMAGE = "assets/river.gif"  # single-frame GIF
+screen.register_shape(RIVER_IMAGE)
+
+# Create two turtles for scrolling
+river1 = turtle.Turtle()
+river1.penup()
+river1.shape(RIVER_IMAGE)
+river1.goto(0, 400)
+river1.showturtle()  # must show turtle for GIF to appear
+
+river2 = turtle.Turtle()
+river2.penup()
+river2.shape(RIVER_IMAGE)
+river2.goto(0, 1200)  # stacked above river1
+river2.showturtle()
+
+scroll_speed = 2  # pixels per frame
+
+def scroll_river():
+    for r in [river1, river2]:
+        r.sety(r.ycor() - scroll_speed)
+        if r.ycor() < -400:  # off bottom
+            r.sety(r.ycor() + 800 + 400)  # move above the other (height+overlap)
+    screen.ontimer(scroll_river, 20)  # ~50 FPS
+
+scroll_river()
+
+# -----------------------------
+# Player
+# -----------------------------
 player = turtle.Turtle()
 player.shape("triangle")
 player.color("green")
 player.penup()
-
-ai = turtle.Turtle()
-ai.shape("triangle")
-ai.color("red")
-ai.penup()
-
-enemy_turtles = []
+player.setheading(90)
+player.goto(0, -300)
 
 # -----------------------------
-# Render Thread
+# Bullet / Enemy stamps
+# -----------------------------
+bullet_turtle = turtle.Turtle()
+bullet_turtle.hideturtle()
+bullet_turtle.penup()
+bullet_turtle.shape("circle")
+bullet_turtle.color("orange")
+
+enemy_turtle = turtle.Turtle()
+enemy_turtle.hideturtle()
+enemy_turtle.penup()
+enemy_turtle.shape("square")
+enemy_turtle.color("yellow")
+
+# -----------------------------
+# Render thread
 # -----------------------------
 def render_thread():
-    global enemy_turtles
+    last_enemy_positions = []
+    last_bullet_positions = []
+    last_player_pos = (None, None)
 
     while True:
         state = get_state()
         if not state:
+            time.sleep(0.08)
             continue
 
-        screen.clear()
-
-        # Draw river
-        river = turtle.Turtle()
-        river.hideturtle()
-        river.penup()
-        river.goto(state["river_left"], -300)
-        river.pendown()
-        river.goto(state["river_left"], 300)
-        river.goto(state["river_right"], 300)
-        river.goto(state["river_right"], -300)
-        river.goto(state["river_left"], -300)
-
         # Player
-        player.goto(state["player_x"], state["player_y"])
-
-        # AI
-        ai.goto(state["ai_x"], state["ai_y"])
+        if (state["player_x"], state["player_y"]) != last_player_pos:
+            player.goto(state["player_x"], state["player_y"])
+            last_player_pos = (state["player_x"], state["player_y"])
 
         # Enemies
-        for t in enemy_turtles:
-            t.hideturtle()
-        enemy_turtles = []
-
-        for e in state["enemies"]:
-            t = turtle.Turtle()
-            t.shape("square")
-            t.color("yellow")
-            t.penup()
-            t.goto(e[0], e[1])
-            enemy_turtles.append(t)
+        enemy_positions = [(e[0], e[1]) for e in state["enemies"]]
+        if enemy_positions != last_enemy_positions:
+            enemy_turtle.clearstamps()
+            for e in state["enemies"]:
+                enemy_turtle.goto(e[0], e[1])
+                enemy_turtle.stamp()
+            last_enemy_positions = enemy_positions
 
         # Bullets
-        for b in state["bullets"]:
-            bt = turtle.Turtle()
-            bt.shape("circle")
-            bt.color("orange")
-            bt.penup()
-            bt.goto(b[0], b[1])
+        bullet_positions = [(b[0], b[1]) for b in state["bullets"]]
+        if bullet_positions != last_bullet_positions:
+            bullet_turtle.clearstamps()
+            for b in state["bullets"]:
+                bullet_turtle.goto(b[0], b[1])
+                bullet_turtle.stamp()
+            last_bullet_positions = bullet_positions
 
         screen.update()
-        time.sleep(0.03)
-
+        time.sleep(0.03)  # smoother than 0.08
 
 # -----------------------------
 # Keyboard controls
 # -----------------------------
-def go_left(): send_action("LEFT")
-def go_right(): send_action("RIGHT")
-def go_up(): send_action("UP")
-def go_down(): send_action("DOWN")
-def fire(): send_action("FIRE")
-
-screen.onkey(go_left, "Left")
-screen.onkey(go_right, "Right")
-screen.onkey(go_up, "Up")
-screen.onkey(go_down, "Down")
-screen.onkey(fire, "space")
 screen.listen()
-
+screen.onkey(lambda: send_action("LEFT"), "Left")
+screen.onkey(lambda: send_action("RIGHT"), "Right")
+screen.onkey(lambda: send_action("UP"), "Up")
+screen.onkey(lambda: send_action("DOWN"), "Down")
+screen.onkey(lambda: send_action("FIRE"), "space")
 
 # -----------------------------
-# Start threads
+# Start render thread
 # -----------------------------
 t = threading.Thread(target=render_thread, daemon=True)
 t.start()
 
 turtle.done()
+
+# -----------------------------
+# Cleanup
+# -----------------------------
+sftp.close()
+ssh.close()
