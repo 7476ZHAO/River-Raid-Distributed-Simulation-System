@@ -3,116 +3,242 @@ import random
 import time
 import threading
 import os
+import sys
+import fcntl
+from typing import Dict, Tuple, Optional
 
 # -----------------------------
 # Shared memory paths on VPS
 # -----------------------------
 PLAYER_ACTION_FILE = "/tmp/player_action"
 GAME_STATE_FILE = "/tmp/game_state.json"
+GAME_STATE_TMP_FILE = f"{GAME_STATE_FILE}.tmp"
 
 # -----------------------------
-# Initial game state
+# Gameplay constants
 # -----------------------------
-game_state = {
-    "player_x": 0,
-    "player_y": -200,
-    "ai_x": 0,
-    "ai_y": 150,
-    "bullets": [],
-    "enemies": [],
-    "river_left": -150,
-    "river_right": 150
+RIVER_LEFT = -175
+RIVER_RIGHT = 175
+PLAYER_MIN_X = -150
+PLAYER_MAX_X = 150
+PLAYER_SPEED = 8
+BULLET_SPEED = 15
+MAX_ENEMIES = 8
+ENEMY_SPAWN_CHANCE = 0.02  # evaluated every 50 ms
+
+ENEMY_PROPERTIES: Dict[str, Dict[str, float]] = {
+    "H": {"speed": 85.0, "score": 100, "radius": 25},  # Helicopter
+    "J": {"speed": 110.0, "score": 150, "radius": 25},  # Jet
+    "B": {"speed": 60.0, "score": 125, "radius": 40},  # Boat
 }
 
-player_lock = threading.Lock()
+# -----------------------------
+# Global state
+# -----------------------------
+state: Dict[str, object] = {
+    "player": {"x": 0.0, "y": -250.0},
+    "enemies": [],
+    "bullets": [],
+    "score": 0,
+    "game_over": False,
+}
+
+state_lock = threading.Lock()
+stop_event = threading.Event()
+last_action_nonce = -1
 
 
 # -----------------------------
-# AI random action thread
+# File helpers
 # -----------------------------
-def ai_action_thread():
-    while True:
-        game_state["ai_move"] = random.choice(["H", "J", "B", "NONE"])
-        time.sleep(0.15)
+def ensure_shared_files() -> None:
+    """Create shared memory files with permissive permissions."""
+    for path in (GAME_STATE_FILE, PLAYER_ACTION_FILE):
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("" if path == PLAYER_ACTION_FILE else json.dumps(state))
+            os.chmod(path, 0o666)
+    if not os.path.exists(GAME_STATE_TMP_FILE):
+        with open(GAME_STATE_TMP_FILE, "w", encoding="utf-8") as f:
+            f.write(json.dumps(state))
+        os.chmod(GAME_STATE_TMP_FILE, 0o666)
+
+
+def save_state() -> None:
+    """Persist state atomically so the client never reads partial data."""
+    with state_lock:
+        snapshot = json.dumps(state)
+    with open(GAME_STATE_TMP_FILE, "w", encoding="utf-8") as tmp:
+        tmp.write(snapshot)
+    os.replace(GAME_STATE_TMP_FILE, GAME_STATE_FILE)
+    os.chmod(GAME_STATE_FILE, 0o666)
 
 
 # -----------------------------
-# Game Logic Thread
+# Enemy helpers
 # -----------------------------
-def game_logic_thread():
-    while True:
-        # -------------------------
-        # 1. Read player action from file
-        # -------------------------
-        if os.path.exists(PLAYER_ACTION_FILE):
-            with open(PLAYER_ACTION_FILE, "r") as f:
-                player_action = f.read().strip()
-        else:
-            player_action = "NONE"
+def spawn_enemy(now: float) -> Dict[str, float]:
+    """Create a new enemy at the left edge of the river."""
+    enemy_type = random.choice(list(ENEMY_PROPERTIES.keys()))
+    return {
+        "type": enemy_type,
+        "x": float(RIVER_LEFT + 1),
+        "y": random.uniform(-200.0, 280.0),
+        "spawn_time": now,
+        "last_move_time": now,
+    }
 
-        # -------------------------
-        # 2. Update player
-        # -------------------------
-        if player_action == "LEFT":
-            game_state["player_x"] -= 10
-        elif player_action == "RIGHT":
-            game_state["player_x"] += 10
-        elif player_action == "UP":
-            game_state["player_y"] += 10
-        elif player_action == "DOWN":
-            game_state["player_y"] -= 10
-        elif player_action == "FIRE":
-            game_state["bullets"].append([game_state["player_x"], game_state["player_y"] + 20])
 
-        # -------------------------
-        # 3. Update AI
-        # -------------------------
-        ai_move = game_state.get("ai_move", "NONE")
+def move_enemies(now: float) -> None:
+    """Advance all enemies horizontally and drop any that exit right side."""
+    for enemy in state["enemies"][:]:
+        props = ENEMY_PROPERTIES[enemy["type"]]
+        last_time = enemy.get("last_move_time", now)
+        delta = max(0.0, now - last_time)
+        enemy["x"] += props["speed"] * delta
+        enemy["last_move_time"] = now
 
-        if ai_move == "H":  # left
-            game_state["ai_x"] -= 10
-        elif ai_move == "J":  # right
-            game_state["ai_x"] += 10
-        elif ai_move == "B":  # fire
-            game_state["bullets"].append([game_state["ai_x"], game_state["ai_y"] - 20])
+        if enemy["x"] >= RIVER_RIGHT - 2:
+            state["enemies"].remove(enemy)
 
-        # -------------------------
-        # 4. Move bullets
-        # -------------------------
-        for b in game_state["bullets"]:
-            b[1] += 15
-        game_state["bullets"] = [b for b in game_state["bullets"] if b[1] < 300]
 
-        # -------------------------
-        # 5. Random enemies
-        # -------------------------
-        if random.random() < 0.03:
-            game_state["enemies"].append([random.randint(-120, 120), 300])
+# -----------------------------
+# Bullet helpers
+# -----------------------------
+def move_bullets() -> None:
+    """Move bullets upward and discard those off-screen."""
+    for bullet in state["bullets"][:]:
+        bullet["y"] += BULLET_SPEED
+        if bullet["y"] > 320:
+            state["bullets"].remove(bullet)
 
-        for e in game_state["enemies"]:
-            e[1] -= 5
-        game_state["enemies"] = [e for e in game_state["enemies"] if e[1] > -300]
 
-        # -------------------------
-        # 6. Write game_state.json
-        # -------------------------
-        with open(GAME_STATE_FILE, "w") as f:
-            json.dump(game_state, f)
+def check_collision(bullet: Dict[str, float], enemy: Dict[str, float]) -> bool:
+    props = ENEMY_PROPERTIES[enemy["type"]]
+    dx = bullet["x"] - enemy["x"]
+    dy = bullet["y"] - enemy["y"]
+    return (dx * dx + dy * dy) ** 0.5 <= props["radius"]
 
+
+# -----------------------------
+# Threads
+# -----------------------------
+def enemy_thread() -> None:
+    while not stop_event.is_set():
+        now = time.time()
+        with state_lock:
+            move_enemies(now)
+            if len(state["enemies"]) < MAX_ENEMIES and random.random() < ENEMY_SPAWN_CHANCE:
+                state["enemies"].append(spawn_enemy(now))
+        save_state()
+        time.sleep(0.05)
+
+
+def bullet_thread() -> None:
+    while not stop_event.is_set():
+        with state_lock:
+            move_bullets()
+            for bullet in state["bullets"][:]:
+                for enemy in state["enemies"][:]:
+                    if check_collision(bullet, enemy):
+                        state["score"] += ENEMY_PROPERTIES[enemy["type"]]["score"]
+                        state["bullets"].remove(bullet)
+                        state["enemies"].remove(enemy)
+                        break
+        save_state()
         time.sleep(0.03)
 
 
+def read_action_file() -> Tuple[Optional[str], Optional[int]]:
+    if not os.path.exists(PLAYER_ACTION_FILE):
+        return None, None
+
+    try:
+        with open(PLAYER_ACTION_FILE, "r", encoding="utf-8") as action_file:
+            try:
+                fcntl.flock(action_file, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return None, None
+            payload = action_file.read().strip()
+            fcntl.flock(action_file, fcntl.LOCK_UN)
+    except Exception as exc:  # noqa: BLE001 - log and continue
+        print(f"Failed to read action file: {exc}")
+        return None, None
+
+    if not payload:
+        return None, None
+
+    try:
+        message = json.loads(payload)
+        return message.get("action"), message.get("nonce")
+    except json.JSONDecodeError:
+        return payload, None
+
+
+def player_thread() -> None:
+    global last_action_nonce
+
+    while not stop_event.is_set():
+        action, nonce = read_action_file()
+        if not action:
+            time.sleep(0.02)
+            continue
+
+        action = action.upper()
+        if nonce is not None:
+            if nonce == last_action_nonce:
+                time.sleep(0.02)
+                continue
+            last_action_nonce = nonce
+        else:
+            last_action_nonce += 1
+
+        with state_lock:
+            if action == "LEFT":
+                state["player"]["x"] = max(PLAYER_MIN_X, state["player"]["x"] - PLAYER_SPEED)
+            elif action == "RIGHT":
+                state["player"]["x"] = min(PLAYER_MAX_X, state["player"]["x"] + PLAYER_SPEED)
+            elif action == "FIRE":
+                state["bullets"].append({
+                    "x": state["player"]["x"],
+                    "y": state["player"]["y"] + 20,
+                })
+        save_state()
+        time.sleep(0.02)
+
+
 # -----------------------------
-# Start threads
+# Entrypoint
 # -----------------------------
-print("Server running with AI thread + Game logic thread")
+def main() -> None:
+    print("River Raid server starting...")
+    ensure_shared_files()
 
-t1 = threading.Thread(target=ai_action_thread, daemon=True)
-t2 = threading.Thread(target=game_logic_thread, daemon=True)
+    with state_lock:
+        state["enemies"] = [spawn_enemy(time.time()) for _ in range(3)]
+        state["bullets"] = []
+        state["score"] = 0
+        state["player"] = {"x": 0.0, "y": -250.0}
+    save_state()
 
-t1.start()
-t2.start()
+    threads = [
+        threading.Thread(target=enemy_thread, daemon=True),
+        threading.Thread(target=player_thread, daemon=True),
+        threading.Thread(target=bullet_thread, daemon=True),
+    ]
 
-# Keep server alive
-while True:
-    time.sleep(1)
+    for thread in threads:
+        thread.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nServer shutting down...")
+        stop_event.set()
+        time.sleep(0.2)
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
