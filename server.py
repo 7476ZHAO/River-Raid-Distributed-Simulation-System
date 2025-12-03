@@ -16,88 +16,127 @@ GAME_STATE_FILE = "/tmp/game_state.json"
 game_state = {
     "player_x": 0,
     "player_y": -200,
-    "ai_x": 0,
-    "ai_y": 150,
-    "bullets": [],
-    "enemies": [],
+    "bullets": [],       # [x, y, dy]
+    "enemies": [],       # [x, y, last_shot_time]
     "river_left": -150,
     "river_right": 150
 }
 
-player_lock = threading.Lock()
-
+state_lock = threading.Lock()
 
 # -----------------------------
-# AI random action thread
+# Settings
 # -----------------------------
-def ai_action_thread():
-    while True:
-        game_state["ai_move"] = random.choice(["H", "J", "B", "NONE"])
-        time.sleep(0.15)
-
+ENEMY_FIRE_INTERVAL = 3.0  # seconds
+MAX_ENEMIES = 10           # limit number of enemies
+MAX_BULLETS = 30           # limit number of bullets
 
 # -----------------------------
 # Game Logic Thread
 # -----------------------------
 def game_logic_thread():
     while True:
-        # -------------------------
-        # 1. Read player action from file
-        # -------------------------
+        # 1. Read player action
         if os.path.exists(PLAYER_ACTION_FILE):
             with open(PLAYER_ACTION_FILE, "r") as f:
                 player_action = f.read().strip()
+            # Reset action
+            with open(PLAYER_ACTION_FILE, "w") as f:
+                f.write("NONE")
         else:
             player_action = "NONE"
 
-        # -------------------------
-        # 2. Update player
-        # -------------------------
-        if player_action == "LEFT":
-            game_state["player_x"] -= 10
-        elif player_action == "RIGHT":
-            game_state["player_x"] += 10
-        elif player_action == "UP":
-            game_state["player_y"] += 10
-        elif player_action == "DOWN":
-            game_state["player_y"] -= 10
-        elif player_action == "FIRE":
-            game_state["bullets"].append([game_state["player_x"], game_state["player_y"] + 20])
+        with state_lock:
+            # -------------------------
+            # Update player
+            # -------------------------
+            if player_action == "LEFT":
+                game_state["player_x"] -= 10
+            elif player_action == "RIGHT":
+                game_state["player_x"] += 10
+            elif player_action == "UP":
+                game_state["player_y"] += 10
+            elif player_action == "DOWN":
+                game_state["player_y"] -= 10
+            elif player_action == "FIRE":
+                game_state["bullets"].append([game_state["player_x"], game_state["player_y"] + 20, 15])
 
-        # -------------------------
-        # 3. Update AI
-        # -------------------------
-        ai_move = game_state.get("ai_move", "NONE")
+            # Keep player inside river
+            game_state["player_x"] = max(game_state["river_left"] + 10,
+                                         min(game_state["river_right"] - 10, game_state["player_x"]))
+            game_state["player_y"] = max(-300, min(300, game_state["player_y"]))
 
-        if ai_move == "H":  # left
-            game_state["ai_x"] -= 10
-        elif ai_move == "J":  # right
-            game_state["ai_x"] += 10
-        elif ai_move == "B":  # fire
-            game_state["bullets"].append([game_state["ai_x"], game_state["ai_y"] - 20])
+            # -------------------------
+            # Spawn enemies randomly (with limit)
+            # -------------------------
+            if len(game_state["enemies"]) < MAX_ENEMIES and random.random() < 0.03:
+                game_state["enemies"].append([random.randint(-120, 120), 300, time.time()])
 
-        # -------------------------
-        # 4. Move bullets
-        # -------------------------
-        for b in game_state["bullets"]:
-            b[1] += 15
-        game_state["bullets"] = [b for b in game_state["bullets"] if b[1] < 300]
+            # -------------------------
+            # Move enemies and shoot
+            # -------------------------
+            now = time.time()
+            for e in game_state["enemies"]:
+                e[1] -= 5  # move down
+                # Enemy shooting
+                if now - e[2] > ENEMY_FIRE_INTERVAL:
+                    game_state["bullets"].append([e[0], e[1] - 20, -15])
+                    e[2] = now
 
-        # -------------------------
-        # 5. Random enemies
-        # -------------------------
-        if random.random() < 0.03:
-            game_state["enemies"].append([random.randint(-120, 120), 300])
+            # Remove off-screen enemies
+            game_state["enemies"] = [e for e in game_state["enemies"] if e[1] > -300]
 
-        for e in game_state["enemies"]:
-            e[1] -= 5
-        game_state["enemies"] = [e for e in game_state["enemies"] if e[1] > -300]
+            # -------------------------
+            # Move bullets
+            # -------------------------
+            for b in game_state["bullets"]:
+                b[1] += b[2]  # dy
 
-        # -------------------------
-        # 6. Write game_state.json
-        # -------------------------
-        with open(GAME_STATE_FILE, "w") as f:
-            json.dump(game_state, f)
+            # Remove off-screen bullets
+            game_state["bullets"] = [b for b in game_state["bullets"] if -300 < b[1] < 300]
+
+            # Limit total bullets for performance
+            game_state["bullets"] = game_state["bullets"][:MAX_BULLETS]
+
+            # -------------------------
+            # Collision: player bullets vs enemies
+            # -------------------------
+            new_bullets = []
+            for b in game_state["bullets"]:
+                hit = False
+                if b[2] > 0:  # player bullet
+                    for e in game_state["enemies"]:
+                        if abs(b[0] - e[0]) < 15 and abs(b[1] - e[1]) < 15:
+                            hit = True
+                            game_state["enemies"].remove(e)
+                            break
+                if not hit:
+                    new_bullets.append(b)
+            game_state["bullets"] = new_bullets
+
+            # -------------------------
+            # Collision: enemy bullets vs player
+            # -------------------------
+            player_hit = False
+            new_bullets = []
+            for b in game_state["bullets"]:
+                if b[2] < 0:  # enemy bullet
+                    if abs(b[0] - game_state["player_x"]) < 15 and abs(b[1] - game_state["player_y"]) < 15:
+                        player_hit = True
+                        continue  # remove bullet
+                new_bullets.append(b)
+            game_state["bullets"] = new_bullets
+
+            if player_hit:
+                # Reset player to start
+                game_state["player_x"] = 0
+                game_state["player_y"] = -200
+
+            # -------------------------
+            # Write game state to file
+            # -------------------------
+            with open(GAME_STATE_FILE, "w") as f:
+                json.dump(game_state, f)
 
         time.sleep(0.03)
 
@@ -105,13 +144,10 @@ def game_logic_thread():
 # -----------------------------
 # Start threads
 # -----------------------------
-print("Server running with AI thread + Game logic thread")
+t = threading.Thread(target=game_logic_thread, daemon=True)
+t.start()
 
-t1 = threading.Thread(target=ai_action_thread, daemon=True)
-t2 = threading.Thread(target=game_logic_thread, daemon=True)
-
-t1.start()
-t2.start()
+print("Server running...")
 
 # Keep server alive
 while True:
