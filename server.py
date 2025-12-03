@@ -149,6 +149,5 @@ t.start()
 
 print("Server running...")
 
-# Keep server alive
 while True:
     time.sleep(1)

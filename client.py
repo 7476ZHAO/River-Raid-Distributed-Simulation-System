@@ -74,9 +74,9 @@ def get_state():
         return None
 
 
-# -----------------------------
+# ----------------------------
 # Turtle setup
-# -----------------------------
+# ----------------------------
 screen = turtle.Screen()
 screen.title("River Raid")
 screen.setup(600, 800)  # portrait
