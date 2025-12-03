@@ -52,26 +52,46 @@ last_action_nonce = -1
 # File helpers
 # -----------------------------
 def ensure_shared_files() -> None:
-    """Create shared memory files with permissive permissions."""
-    for path in (GAME_STATE_FILE, PLAYER_ACTION_FILE):
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("" if path == PLAYER_ACTION_FILE else json.dumps(state))
-            os.chmod(path, 0o666)
-    if not os.path.exists(GAME_STATE_TMP_FILE):
-        with open(GAME_STATE_TMP_FILE, "w", encoding="utf-8") as f:
+    """Create shared-memory files and ensure correct permissions."""
+    # create main state file
+    if not os.path.exists(GAME_STATE_FILE):
+        with open(GAME_STATE_FILE, "w", encoding="utf-8") as f:
             f.write(json.dumps(state))
-        os.chmod(GAME_STATE_TMP_FILE, 0o666)
+        os.chmod(GAME_STATE_FILE, 0o666)
 
+    # create tmp file ALWAYS
+    with open(GAME_STATE_TMP_FILE, "w", encoding="utf-8") as f:
+        f.write(json.dumps(state))
+    os.chmod(GAME_STATE_TMP_FILE, 0o666)
+
+    # create action file (empty)
+    if not os.path.exists(PLAYER_ACTION_FILE):
+        with open(PLAYER_ACTION_FILE, "w", encoding="utf-8") as f:
+            f.write("")
+        os.chmod(PLAYER_ACTION_FILE, 0o666)
 
 def save_state() -> None:
-    """Persist state atomically so the client never reads partial data."""
+    """Thread-safe and safe against race conditions."""
     with state_lock:
         snapshot = json.dumps(state)
-    with open(GAME_STATE_TMP_FILE, "w", encoding="utf-8") as tmp:
-        tmp.write(snapshot)
-    os.replace(GAME_STATE_TMP_FILE, GAME_STATE_FILE)
-    os.chmod(GAME_STATE_FILE, 0o666)
+
+        # ALWAYS create tmp file before replace
+        with open(GAME_STATE_TMP_FILE, "w", encoding="utf-8") as tmp:
+            tmp.write(snapshot)
+        os.chmod(GAME_STATE_TMP_FILE, 0o666)
+
+        # replace atomically (never missing)
+        try:
+            os.replace(GAME_STATE_TMP_FILE, GAME_STATE_FILE)
+        except FileNotFoundError:
+            # recreate tmp then replace again
+            with open(GAME_STATE_TMP_FILE, "w", encoding="utf-8") as tmp:
+                tmp.write(snapshot)
+            os.replace(GAME_STATE_TMP_FILE, GAME_STATE_FILE)
+
+        # ensure permissions
+        os.chmod(GAME_STATE_FILE, 0o666)
+
 
 
 # -----------------------------
