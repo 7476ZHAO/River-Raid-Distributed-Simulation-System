@@ -36,20 +36,19 @@ MAX_BULLETS = 30           # limit number of bullets
 # -----------------------------
 def game_logic_thread():
     while True:
-        # 1. Read player action
+
+        # 1. Read player action (server must NOT write to this file)
         if os.path.exists(PLAYER_ACTION_FILE):
             with open(PLAYER_ACTION_FILE, "r") as f:
                 player_action = f.read().strip()
-            # Reset action
-            with open(PLAYER_ACTION_FILE, "w") as f:
-                f.write("NONE")
         else:
             player_action = "NONE"
 
+        # server CANNOT write or delete /tmp/player_action (owned by SSH user)
+        # client overwrites it each time, so no reset is needed
+
         with state_lock:
-            # -------------------------
             # Update player
-            # -------------------------
             if player_action == "LEFT":
                 game_state["player_x"] -= 10
             elif player_action == "RIGHT":
@@ -59,7 +58,9 @@ def game_logic_thread():
             elif player_action == "DOWN":
                 game_state["player_y"] -= 10
             elif player_action == "FIRE":
-                game_state["bullets"].append([game_state["player_x"], game_state["player_y"] + 20, 15])
+                game_state["bullets"].append([
+                    game_state["player_x"], game_state["player_y"] + 20, 15
+                ])
 
             # Keep player inside river
             game_state["player_x"] = max(game_state["river_left"] + 10,
@@ -150,4 +151,5 @@ t.start()
 print("Server running...")
 
 while True:
+
     time.sleep(1)
