@@ -8,7 +8,7 @@ import io
 # -----------------------------
 # SSH CONFIG
 # -----------------------------
-VPS_IP = "34.139.110.221" #need to update every time the vps restart
+VPS_IP = "34.26.231.165" #need to update every time the vps restart
 USERNAME = "rsa-key-20251020"
 SSH_KEY = r"D:\SCSU\25Fall\CSCI 593\SSH\rsa-key-20251020.ppk"
 GAME_STATE_FILE = "/tmp/game_state.json"
